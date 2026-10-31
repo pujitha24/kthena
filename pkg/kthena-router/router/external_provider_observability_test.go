@@ -352,6 +352,41 @@ func TestForwardResponsesStreamReportsTerminalWriteFailure(t *testing.T) {
 	require.ErrorIs(t, err, writeErr)
 }
 
+func TestForwardResponseRestoresHeadersWhenFailedBeforeCommit(t *testing.T) {
+	w := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder(), closeCh: make(chan bool)}
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Writer.Header().Set("X-Request-ID", "req-1")
+	parser := responseParserFor(t, aiv1alpha1.OpenAI, "/v1/chat/completions")
+
+	failed := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Length": []string{"4096"},
+			"X-Backend":      []string{"failed"},
+		},
+		Body: &payloadThenErrorReadCloser{err: io.ErrUnexpectedEOF},
+	}
+	require.ErrorIs(t, forwardResponseWithUsageParser(c, failed, false, parser, nil), io.ErrUnexpectedEOF)
+	require.Equal(t, http.Header{"X-Request-Id": []string{"req-1"}}, c.Writer.Header())
+
+	body := `{"id":"healthy"}`
+	healthy := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Length": []string{fmt.Sprint(len(body))},
+			"X-Backend":      []string{"healthy"},
+		},
+		Body: io.NopCloser(bytes.NewBufferString(body)),
+	}
+	require.NoError(t, forwardResponseWithUsageParser(c, healthy, false, parser, nil))
+
+	assert.Equal(t, []string{"16"}, w.Header().Values("Content-Length"))
+	assert.Equal(t, []string{"healthy"}, w.Header().Values("X-Backend"))
+	assert.Equal(t, "req-1", w.Header().Get("X-Request-ID"))
+	assert.Equal(t, body, w.Body.String())
+}
+
 func TestForwardProviderStreamsTreatCloseNotifyAfterTerminalEventAsComplete(t *testing.T) {
 	tests := []struct {
 		name         string

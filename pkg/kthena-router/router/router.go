@@ -1358,15 +1358,29 @@ func forwardResponseWithUsageParser(
 	parser providers.ResponseUsageParser,
 	onUsage func(providers.TokenUsage),
 ) error {
+	previousHeaders := c.Writer.Header().Clone()
+	previousStatus := c.Writer.Status()
 	copyResponseHeaders(c, resp.Header, stream)
 	c.Status(resp.StatusCode)
 
+	var err error
 	if stream {
-		_, err := providers.ForwardStream(c, resp.Body, parser, onUsage)
-		return err
+		_, err = providers.ForwardStream(c, resp.Body, parser, onUsage)
+	} else {
+		_, err = providers.ForwardBody(c, resp.Body, parser, onUsage)
 	}
 
-	_, err := providers.ForwardBody(c, resp.Body, parser, onUsage)
+	if err != nil && !c.Writer.Written() {
+		// Nothing has been committed downstream, so the caller may retry another
+		// backend. Restore the headers and status from before this attempt so the
+		// failed upstream's headers do not leak into the next response.
+		headers := c.Writer.Header()
+		clear(headers)
+		for key, values := range previousHeaders {
+			headers[key] = values
+		}
+		c.Status(previousStatus)
+	}
 	return err
 }
 
